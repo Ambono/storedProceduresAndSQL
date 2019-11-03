@@ -1,0 +1,185 @@
+GO
+/** Object:  StoredProcedure [dbo].[Performance_ReadALL_ByShoId_MinContigSeats]    Script Date: 31/10/2019 15:56:18 **/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[Performance_ReadALL_ByShoId_MinContigSeats]           
+@EcxID int,              
+@EcxToken varchar(20),              
+@ShoID int,              
+@StartDate datetime,              
+@EndDate datetime,              
+@MinContigSeats int = 2 --default is 2. can pass any other value            
+              
+AS              
+              
+BEGIN            
+  SET NOCOUNT ON --Change made by ATG team            
+  BEGIN TRY            
+            
+    /*    first commit        
+     Get Perfromances For Show By MinContigSeats @ lowest price            
+     31 Jan 2019 Malik Initial Version            
+     13 Feb 2019 Malik Return Total Number of Seats for entire performance ingnoring min price   
+	 06 Jun 2019 Modeste minimum price is base price, must be made to be the minimum available price for the profile
+    */            
+            
+    --EXECUTE CheckEntaContext @EcxID,             
+    --                         @EcxToken            
+    --IF @@ERROR <> 0            
+    --  RETURN @@ERROR            
+            
+    DECLARE @MhrID int,            
+            @PchID int,            
+            @MhrIDFinal int, @MrgID varchar (3), @MrwID varchar (3), @MreID int,            
+            @PerIndex int,            
+            @ProID varchar(5),      
+      @DateUTC Datetime,             
+      @PdaID int,            
+      @ProRestrictedSeason BIT,            
+      @PFS_READ Int      
+            
+    SELECT @ProID = ECX.ProID,      
+     @PdaID =PRO.PdaID,            
+     @ProRestrictedSeason = PRO.ProRestrictedSeason                  
+    FROM dbo.EntaContext ECX WITH (NOLOCK)            
+ JOIN [Profile] PRO WITH(NOLOCK)       ON PRO.ProID = ECX.ProID        
+    WHERE EcxID = @EcxID            
+      
+ SELECT @DateUTC=GETUTCDATE()            
+ SET @PFS_READ = 1        
+            
+ --Change made by ATG team            
+    DECLARE @AvailPrice TABLE (            
+      ID int IDENTITY (1, 1) NOT NULL,            
+      VenID varchar(5),            
+      VenName varchar(500),
+	  VenLogoURL varchar(50),
+	  LcnID varchar (5),            
+      CurID varchar (5),            
+      ShoID int,            
+      ShoName varchar(500),            
+      SeaIndex int,	 
+      SeaStartDate datetime,            
+      LayID int,            
+      PerIndex int,            
+      PerTime datetime,            
+      PstSellStatus int,            
+      SelSellStatus int,            
+      MclNominalPrice money,
+	  BasePrice money,
+	  UnitPrice money,     
+      AvailSeats INT          
+    )            
+           
+    --IF OBJECT_ID('tempdb..#Data') IS NOT NULL DROP TABLE #Data            
+ --Change made by ATG team            
+    DECLARE @Data TABLE (            
+      ID int IDENTITY (1, 1) NOT NULL,--Change made by ATG team            
+      PerIndex int,            
+      SelSellStatus int,            
+      MclID varchar(10),          
+   AllCode varchar(10),  
+   AvailSeats  int          
+    )            
+    DECLARE @Perfs TABLE (            
+      ID int IDENTITY (1, 1) NOT NULL,--Change made by ATG team            
+      PerIndex int            
+    )            
+      
+ IF @ProRestrictedSeason = 0            
+ BEGIN            
+  EXEC RestrictedSeason_UPDATEPROFILE @ProID            
+ END            
+   
+   /*********new ********/ 
+   --Declare some useful variables
+--DECLARE @MrgID varchar (3), @MrwID varchar (3), @MreID int
+
+   -- Get the default discount for the specified performance
+--EXEC GetDefaultDiscount @EcxID, @PerIndex, @MrgID OUT, @MrwID OUT, @MreID OUT
+
+-- We can have more than one cache per performance and profile
+--EXEC GetPriceCacheHeader @EcxID, @PerIndex, @MhrID OUT, @PchID OUT, @MhrIDFinal OUT, NULL
+    
+	 /*********end new ********/ 
+	
+
+    INSERT INTO @Perfs (PerIndex)            
+      SELECT  PerIndex            
+   FROM Performance WITH (NOLOCK)            
+      WHERE ShoID = @ShoID            
+   AND dbo.fnPerformanceOnSaleOffDate(PerIndex, @PdaID)>=  @DateUTC       
+   AND PstSellStatus in (1,4)            
+            AND (dbo.fnPerformancePfsFlag(PerIndex, @PdaID, @DateUTC) & @PFS_READ) <> 0            
+   AND PerTime BETWEEN @StartDate AND @EndDate            
+            
+   --Change made by ATG team added prefix dbo              
+    INSERT INTO @Data (PerIndex,  SelSellStatus, MclID,AllCode)  
+      SELECT DISTINCT P.PerIndex,SL.SelSellStatus,SL.MclID,SL.AllCode  
+     FROM @Perfs P            
+      INNER JOIN dbo.SeatAvail SA WITH (NOLOCK)  ON P.PerIndex = SA.PerIndex  AND SA.SelSellStatus IN (1, 3, 10) 
+      INNER JOIN dbo.SeatLump SL WITH (NOLOCK)   ON SA.STAID = SL.SlpFirstStaID AND SL.SlpNoSeats >= @MinContigSeats            
+      INNER JOIN dbo.ProfileSeatAvail PSA WITH (NOLOCK)  ON PSA.ProID = @ProID AND PSA.SelSellStatus = SL.SelSellStatus AND ISNULL(PSA.AllCode, '') = LTRIM(RTRIM(SL.AllCode))            
+   GROUP BY P.PerIndex,SL.SelSellStatus,SL.MclID,SL.AllCode  
+            
+ UPDATE D          
+ SET D.AvailSeats =D2.TOT
+ FROM @Data D           
+ JOIN (SELECT PA.PerIndex, Sum(PA.PavNoAvailSeats) TOT
+		FROM @Data D
+		INNER JOIN PerformanceAvail PA ON  D.PerIndex = PA.PerIndex AND D.MclID = PA.PrcCode AND D.SelSellStatus = PA.SelSellStatus AND LTRIM(RTRIM(D.AllCode)) = ISNULL(PA.AllCode , '')  AND PA.SelSellStatus IN (1, 3, 10) 
+		GROUP BY PA.PerIndex) D2 ON D2.PerIndex = D.PerIndex
+	     
+    DECLARE cPERF CURSOR FORWARD_ONLY FOR            
+    SELECT  PerIndex            
+    FROM @Perfs            
+            
+    OPEN cPERF            
+    FETCH NEXT FROM cPERF INTO @PerIndex            
+            
+    WHILE (@@FETCH_STATUS = 0)            
+    BEGIN            
+      --Make sure prices are update to date            
+      EXEC dbo.Matrix_CalculatePrices @EcxID,@EcxToken,@PerIndex,NULL,NULL,NULL,NULL,NULL          
+      EXEC GetPriceCacheHeader @EcxID,@PerIndex,@MhrID OUT,@PchID OUT,@MhrIDFinal OUT,NULL            
+      EXEC GetDefaultDiscount @EcxID, @PerIndex, @MrgID OUT, @MrwID OUT, @MreID OUT  
+		INSERT INTO @AvailPrice (VenID, VenName, VenLogoURL, LcnID, CurID, ShoID, ShoName, SeaIndex, SeaStartDate, LayID, PerIndex, PerTime,            
+          PstSellStatus, SelSellStatus, MclNominalPrice, BasePrice, UnitPrice, AvailSeats )       
+      
+      SELECT  V.VenID,V.VenName,V.VenLogoURL,V.LcnID,V.CurID,SN.ShoID,SN.ShoName,S.SeaIndex, S.SeaStartDate,P.LayID,P.PerIndex,P.PerTime,          
+         P.PstSellStatus,SL.SelSellStatus,MCL.MclNominalPrice,SUM (CASE MlyType WHEN 1 THEN PrcGrossAmount ELSE 0 END) As BasePrice  /This is in fact based price.TO DO: name it UnitPrice and update ENTA an Microservices appropriately/,
+		
+		 SUM (CASE WHEN MlyType IN (1, 2) THEN PRC.PrcGrossAmount
+				WHEN MlyType IN ( 4, 5) THEN 
+				 PRC.PrcGrossAmount ELSE 0 END) AS UnitPrice, /This is in fact unit price.TO DO: name it UnitPrice and update ENTA an Microservices appropriately/
+		   SL.AvailSeats
+        FROM dbo.Performance P WITH (NOLOCK)           
+        INNER JOIN dbo.Venue V WITH (NOLOCK) ON V.VenID = P.VenID          
+        INNER JOIN dbo.Season S WITH (NOLOCK) ON S.SeaIndex = P.SeaIndex AND S.LayID = P.LayID AND S.VenID = V.VenID          
+        INNER JOIN dbo.ShowName SN WITH (NOLOCK) ON SN.ShoID = P.ShoID          
+        INNER JOIN @Data SL ON SL.PerIndex = P.PerIndex     
+        INNER JOIN dbo.MatrixHeader MH WITH (NOLOCK) ON MH.MhrID = P.MhrID          
+        INNER JOIN dbo.MatrixColumn  MCL WITH (NOLOCK) ON MCL.MhrID = P.MhrID AND MCL.MclID = SL.MclID AND MCL.MhrLive = MH.MhrLive  
+		INNER JOIN dbo.PriceCache PRC WITH (NOLOCK) ON  PRC.PchID = @PchID AND PRC.MhrID = @MhrIDFinal AND PRC.MrgID = @MrgID AND PRC.MclID =  SL.MclID AND PRC.MrwID = @MrwID AND PRC.MreID = @MreID AND PRC.MlyType IN (1, 2)  
+        WHERE P.PerIndex = @PerIndex        
+        GROUP BY V.VenID,V.VenName,V.VenLogoURL,V.LcnID,V.CurID,SN.ShoID,SN.ShoName,S.SeaIndex,S.SeaStartDate,P.LayID,P.PerIndex,P.PerTime,P.PstSellStatus,SL.SelSellStatus,MCL.MclNominalPrice, SL.AvailSeats,PRC.CurID,PRC.MrgID,PRC.MrwID,PRC.MreID     
+        ORDER BY V.VenID,V.VenName,V.VenLogoURL, V.LcnID, V.CurID, SN.ShoID, SN.ShoName, S.SeaIndex, S.SeaStartDate, P.LayID, P.PerIndex, P.PerTime, P.PstSellStatus, SL.SelSellStatus, MCL.MclNominalPrice  
+      FETCH NEXT FROM cPERF INTO @PerIndex            
+    END            
+            
+    CLOSE cPERF            
+    DEALLOCATE cPERF            
+            
+SELECT ID, VenID,VenName,VenLogoURL,LcnID,CurID,ShoID,ShoName,SeaIndex,SeaStartDate,LayID,PerIndex,PerTime,PstSellStatus,SelSellStatus,MclNominalPrice,BasePrice,UnitPrice,AvailSeats       
+FROM ( SELECT ID, VenID,VenName,VenLogoURL,LcnID,CurID,ShoID,ShoName,SeaIndex,SeaStartDate,LayID,PerIndex,PerTime,PstSellStatus,SelSellStatus,MclNominalPrice,BasePrice, UnitPrice,AvailSeats
+,ROW_NUMBER() OVER (PARTITION BY [PerIndex] ORDER BY [PerIndex], MclNominalPrice,PerTime ASC) AS rn        
+FROM @AvailPrice ) as temp where temp.rn=1  
+  END TRY            
+  BEGIN CATCH            
+  --Error handling code             
+  --Your logic to handle error              
+  END CATCH            
+END
